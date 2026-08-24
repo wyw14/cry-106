@@ -33,7 +33,13 @@ func (s *Service) Reverse(groupID string) (operation.Owner, error) {
 
 func (s *Service) start(groupID, purpose, target string) (operation.Owner, error) {
 	operationID := uuid.NewString()
-	coordinationKey := groupID + ":" + purpose
+	// Switching and reversal must arbitrate on the same fan-group ownership
+	// state. If the coordination key embeds the purpose, transfer and reverse
+	// acquire disjoint entries and both proceed to issue conflicting commands
+	// to the same group (e.g. forward-ramp and reverse-prepare on V2), which
+	// trips the coupling guard and stops the whole group. Key on the group
+	// alone so at most one operation can hold the group at any time.
+	coordinationKey := groupID
 	if err := s.arbiter.Begin(coordinationKey, purpose); err != nil {
 		return operation.Owner{}, err
 	}
@@ -44,7 +50,7 @@ func (s *Service) start(groupID, purpose, target string) (operation.Owner, error
 	}
 	if _, err := s.commander.Issue(groupID, model.DeviceFan, target, owner); err != nil {
 		s.owners.Release(owner.ResourceID, owner.OperationID, owner.Generation)
-		s.arbiter.Finish(groupID, purpose, "failed")
+		s.arbiter.Finish(coordinationKey, purpose, "failed")
 		return operation.Owner{}, fmt.Errorf("issue fan target: %w", err)
 	}
 	s.mu.Lock()
