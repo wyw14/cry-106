@@ -26,7 +26,10 @@ func Isolate(ctx context.Context, zoneID, fanID, doorGroup string, stopTimeout t
 	stopContext, cancel := context.WithTimeout(ctx, stopTimeout)
 	defer cancel()
 	stopErr := fans.Stop(stopContext, fanID)
-	sealErr := doors.Seal(stopContext, doorGroup)
+	// The fan-stop deadline bounds the fan action only. Seal against the
+	// incident session context so a slow fan confirmation cannot starve the
+	// doors of closure and confirmation; the fan fault is retained below.
+	sealErr := doors.Seal(ctx, doorGroup)
 	result := IsolationResult{ZoneID: zoneID, Sealed: sealErr == nil, EndedAt: time.Now().UTC()}
 	if stopErr != nil {
 		result.FanError = stopErr.Error()
