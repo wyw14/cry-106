@@ -44,18 +44,38 @@ func (s *Service) Start(ctx context.Context, groupID, mode string) (Session, err
 		s.owners.Release(owner.ResourceID, owner.OperationID, owner.Generation)
 		return Session{}, err
 	}
-	if _, err := s.valves.Open(groupID, owner); err != nil {
+	if _, err := s.journal.AppendStart(ctx, event); err != nil {
 		s.owners.Release(owner.ResourceID, owner.OperationID, owner.Generation)
 		return Session{}, err
 	}
-	if _, err := s.journal.AppendStart(ctx, event); err != nil {
-		s.owners.Release(owner.ResourceID, owner.OperationID, owner.Generation)
+	if _, err := s.valves.Open(groupID, owner); err != nil {
+		s.retireFailedStart(ctx, session, owner)
 		return Session{}, err
 	}
 	s.mu.Lock()
 	s.sessions[session.ID] = session
 	s.mu.Unlock()
 	return session, nil
+}
+
+// retireFailedStart invalidates a session whose start event was already
+// persisted to the journal but whose valves then failed to open. A failed open
+// leaves device state untouched (the commander rejects the command before
+// recording anything), so no close command is issued here. The persisted start
+// is paired with an extraction.stop event so the next recovery does not
+// resurrect an active session bound to a borehole group that no operation
+// owns, and ownership is released. Rollback errors are swallowed so the caller
+// surfaces the original failure rather than a partial-rollback artifact.
+func (s *Service) retireFailedStart(ctx context.Context, session Session, owner operation.Owner) {
+	stopEvent, err := model.NewEvent(uuid.NewString(), model.EventExtractionStop, session.GroupID, owner.Generation, stopPayload{SessionID: session.ID}, time.Now())
+	if err == nil {
+		_, _ = s.journal.AppendStop(ctx, stopEvent)
+	}
+	s.owners.Release(owner.ResourceID, owner.OperationID, owner.Generation)
+}
+
+type stopPayload struct {
+	SessionID string `json:"session_id"`
 }
 
 func (s *Service) Sessions() []Session {
