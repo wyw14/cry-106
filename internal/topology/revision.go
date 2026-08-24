@@ -3,7 +3,6 @@ package topology
 import (
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/wyw14/cry-106/internal/model"
 )
@@ -30,24 +29,19 @@ func (r *Repository) Publish(next model.TopologySnapshot) error {
 		r.mu.Unlock()
 		return fmt.Errorf("topology revision %d does not follow %d", next.Revision, r.current.Revision)
 	}
-	partial := clone(r.current)
-	partial.Revision = next.Revision
-	partial.Nodes = clone(next).Nodes
-	partial.Sealed = clone(next).Sealed
-	r.current = partial
+	// Publish the next revision as a single complete snapshot. The repository
+	// must never expose a topology whose fields were spliced from two
+	// revisions (e.g. revision 88 nodes/sealed over revision 87 edges): that
+	// intermediate state would let callers such as the path finder and the air
+	// regulator plan a route across a half-applied seal. Clone the validated
+	// snapshot up front and swap it in atomically under the write lock, then
+	// notify listeners exactly once with the committed value.
+	published := clone(next)
+	r.current = published
 	listeners := append([]func(model.TopologySnapshot){}, r.listeners...)
-	published := clone(r.current)
 	r.mu.Unlock()
 	for _, listener := range listeners {
-		listener(published)
-	}
-	time.Sleep(30 * time.Millisecond)
-	r.mu.Lock()
-	r.current.Edges = clone(next).Edges
-	published = clone(r.current)
-	r.mu.Unlock()
-	for _, listener := range listeners {
-		listener(published)
+		listener(clone(published))
 	}
 	return nil
 }
